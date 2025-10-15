@@ -1,0 +1,563 @@
+import sys
+import os
+import re
+import traceback
+from datetime import datetime
+from typing import List, Optional
+import subprocess
+
+from PyQt6.QtWidgets import (
+    QApplication,
+    QWidget,
+    QLabel,
+    QPushButton,
+    QLineEdit,
+    QTextEdit,
+    QVBoxLayout,
+    QHBoxLayout,
+    QGridLayout,
+    QFileDialog,
+    QCheckBox,
+    QProgressBar,
+    QMessageBox,
+    QListWidget,
+    QListWidgetItem,
+    QGroupBox,
+    QStyle,
+)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QRegularExpression
+from PyQt6.QtGui import (
+    QIcon, QPixmap, QTextCharFormat, QTextCursor, QColor, QRegularExpressionValidator, QFont,
+)
+
+ASCII_ART = r"""                                                                                                                        
+          ____                                      __     __        __                            __                      __       
+         6MMMMb                                     MP     MM        MM                            MP                      MM       
+        8P    YM                                    MM     MM        MM                            MY                      MM       
+       6M      Y ___  __   _____  ____    _    ___  yM     MM  __    MM   __   ____  ____    ___   YM      ____     ____   MM  __   
+       MM        `MM 6MM  6MMMMMb `MM(   ,M.   )M' MMMMMM  MM 6MMb   MM   d'  6MMMMb `MM(    )M'  MMMMMM  6MMMMb   6MMMMb. MM 6MMb  
+       MM         MM69 " 6M'   `Mb `Mb   dMb   d'   MM     MMM9 `Mb  MM  d'  6M'  `Mb `Mb    d'    MM    6M'  `Mb 6M'   Mb MMM9 `Mb 
+       MM     ___ MM'    MM     MM  YM. ,PYM. ,P    MM     MM'   MM  MM d'   MM    MM  YM.  ,P     MM    MM    MM MM    `' MM'   MM 
+       MM     `M' MM     MM     MM  `Mb d'`Mb d'    MM     MM    MM  MMdM.   MMMMMMMM   MM  M      MM    MMMMMMMM MM       MM    MM 
+       YM      M  MM     MM     MM   YM,P  YM,P     MM     MM    MM  MMPYM.  MM         `Mbd'      MM    MM       MM       MM    MM 
+        8b    d9  MM     YM.   ,M9   `MM'  `MM'     YM.,   MM    MM  MM  YM. YM    d9    YMP   68b YM ,  YM    d9 YM.   d9 MM    MM 
+         YMMMM9   MM      YMMMMM9     YP    YP       YM9   MM    MM  MM   YM  YMMMM9      M    Y89  YM9   YMMMM9   YMMMM9  MM    MM 
+                                                                                          d'                                         
+                                                                                      (8),P                                          
+                                                                                       YMM       
+                                         
+"""
+
+NEON_GREEN_STYLE = "QGroupBox::title { color: #39FF14; font-weight: bold; }"
+
+class ExifToolWorker(QThread):
+    log_signal = pyqtSignal(str, str)
+    progress_signal = pyqtSignal(int)
+    finished_signal = pyqtSignal(bool)
+
+    def __init__(self, exiftool_path: str, args_list: List[str], total_files: int):
+        super().__init__()
+        self.exiftool_path = exiftool_path
+        self.args_list = args_list
+        self.total_files = total_files
+
+    def log(self, level: str, message: str) -> None:
+        self.log_signal.emit(level, message)
+
+    def run(self) -> None:
+        self.log("info", "Starting ExifTool process...")
+        try:
+            if "-o" in self.args_list:
+                idx = self.args_list.index("-o")
+                out_pattern = self.args_list[idx + 1]
+                input_files = self.args_list[idx + 2 :]
+            else:
+                idx = -1
+                out_pattern = ""
+                input_files = self.args_list
+
+            total = len(input_files)
+            success = True
+
+            for i, in_file in enumerate(input_files, start=1):
+                if idx != -1:
+                    in_dir = os.path.dirname(in_file)
+                    base_name = os.path.basename(in_file)
+                    base_wo_ext, ext = os.path.splitext(base_name)
+                    out_name = out_pattern.replace("%d", in_dir + os.sep).replace(
+                        "%f", base_wo_ext
+                    ).replace("%e", ext.lstrip("."))
+                    if os.path.exists(out_name):
+                        timestamp = datetime.now().strftime("_%Y%m%d_%H%M%S")
+                        out_name = out_pattern.replace("%d", in_dir + os.sep).replace(
+                            "%f", base_wo_ext + timestamp
+                        ).replace("%e", ext.lstrip("."))
+                    args = self.args_list[:idx] + ["-o", out_name] + [in_file]
+                else:
+                    args = [in_file]
+
+                cmd_list = [self.exiftool_path] + args
+
+                self.log("debug", f"Running command:\n{' '.join(cmd_list)}")
+
+                # Use subprocess to avoid path quoting issues
+                proc = subprocess.Popen(
+                    cmd_list,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                )
+                output, error = proc.communicate()
+                retcode = proc.returncode
+
+                if retcode != 0:
+                    self.log("error", f"ExifTool exited with code {retcode}: {error.strip()}")
+                    success = False
+
+                self.log("info", output.strip())
+
+                progress_percent = int((i / total) * 100)
+                self.progress_signal.emit(progress_percent)
+
+            if success:
+                self.log("info", "ExifTool processing finished successfully.")
+            else:
+                self.log("error", "ExifTool processing finished with errors.")
+
+            self.finished_signal.emit(success)
+
+        except Exception:
+            tb = traceback.format_exc()
+            self.log("error", f"Exception during ExifTool execution:\n{tb}")
+            self.finished_signal.emit(False)
+
+
+class ExifToolGPSApp(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("ExifTool GPS & Metadata Setter by Growthkey.tech")
+        self.resize(1680, 730)
+        exif_folder = r"C:\Users\block\Desktop\Programs\Change Image EXIF+Geotag"
+        exe_name = "exiftool.exe"
+        full_path = os.path.join(exif_folder, exe_name)
+        self.exiftool_path: str = full_path if os.path.isfile(full_path) else "exiftool.exe"
+        self.selected_files: List[str] = []
+        self.exif_worker: Optional[ExifToolWorker] = None
+        self.last_command: str = ""
+        self.initUI()
+        self.setup_validators()
+        self.validate_inputs()
+        self.center_on_screen()
+        self.connect_signals()
+        self.preload_ascii_art()
+
+    def center_on_screen(self) -> None:
+        screen = QApplication.primaryScreen()
+        screen_geometry = screen.geometry()
+        size = self.geometry()
+        x = (screen_geometry.width() - size.width()) // 2
+        y = (screen_geometry.height() - size.height()) // 2
+        self.move(x, y)
+
+    def initUI(self) -> None:
+        main_layout = QHBoxLayout()
+
+        left_panel = QVBoxLayout()
+        file_group = QGroupBox("File Selection")
+        file_group.setStyleSheet(NEON_GREEN_STYLE)
+        file_group.setToolTip("Select image files or folders to process")
+        file_layout = QHBoxLayout()
+        self.file_label = QLabel("No files selected")
+        self.file_label.setWordWrap(True)
+        self.btn_select_files = QPushButton("Select Images or Folder")
+        file_layout.addWidget(self.file_label)
+        file_layout.addWidget(self.btn_select_files)
+        file_group.setLayout(file_layout)
+        left_panel.addWidget(file_group)
+        self.recursive_checkbox = QCheckBox("Recursive scan for dropped folders")
+        self.recursive_checkbox.setChecked(True)
+        self.recursive_checkbox.setToolTip("If checked, scan all subfolders when selecting folders")
+        left_panel.addWidget(self.recursive_checkbox)
+        left_panel.addSpacing(10)
+        self.gps_group = QGroupBox("GPS Coordinates")
+        self.gps_group.setStyleSheet(NEON_GREEN_STYLE)
+        self.gps_group.setToolTip("Enter GPS latitude, longitude, and optional altitude")
+        gps_layout = QGridLayout()
+        gps_layout.addWidget(QLabel("Latitude (-90 to 90):"), 0, 0)
+        self.lat_input = QLineEdit()
+        self.lat_input.setPlaceholderText("e.g. 37.773972")
+        gps_layout.addWidget(self.lat_input, 0, 1)
+        self.lat_error = QLabel()
+        self.lat_error.setStyleSheet("color: red")
+        gps_layout.addWidget(self.lat_error, 1, 1)
+        gps_layout.addWidget(QLabel("Longitude (-180 to 180):"), 2, 0)
+        self.lon_input = QLineEdit()
+        self.lon_input.setPlaceholderText("e.g. -122.431297")
+        gps_layout.addWidget(self.lon_input, 2, 1)
+        self.lon_error = QLabel()
+        self.lon_error.setStyleSheet("color: red")
+        gps_layout.addWidget(self.lon_error, 3, 1)
+        gps_layout.addWidget(QLabel("Altitude (meters):"), 4, 0)
+        self.alt_input = QLineEdit()
+        self.alt_input.setPlaceholderText("optional")
+        gps_layout.addWidget(self.alt_input, 4, 1)
+        self.gps_group.setLayout(gps_layout)
+        left_panel.addWidget(self.gps_group)
+        self.orientation_group = QGroupBox("Orientation")
+        self.orientation_group.setStyleSheet(NEON_GREEN_STYLE)
+        self.orientation_group.setToolTip("Input EXIF orientation code (1-8)")
+        orientation_layout = QHBoxLayout()
+        self.orientation_input = QLineEdit()
+        self.orientation_input.setPlaceholderText("1-8 (EXIF orientation codes)")
+        orientation_layout.addWidget(self.orientation_input)
+        self.orientation_group.setLayout(orientation_layout)
+        left_panel.addWidget(self.orientation_group)
+        self.datetime_group = QGroupBox("Date & Time")
+        self.datetime_group.setStyleSheet(NEON_GREEN_STYLE)
+        self.datetime_group.setToolTip("Set original, create, and modify timestamps for the image")
+        datetime_layout = QGridLayout()
+        datetime_layout.addWidget(QLabel("DateTime (YYYY:MM:DD HH:MM:SS):"), 0, 0)
+        self.datetime_input = QLineEdit()
+        self.datetime_input.setPlaceholderText("e.g. 2025:10:15 13:00:00")
+        datetime_layout.addWidget(self.datetime_input, 0, 1)
+        self.dt_error = QLabel()
+        self.dt_error.setStyleSheet("color: red")
+        datetime_layout.addWidget(self.dt_error, 1, 1)
+        self.datetime_group.setLayout(datetime_layout)
+        left_panel.addWidget(self.datetime_group)
+        self.copyright_group = QGroupBox("Copyright Information")
+        self.copyright_group.setStyleSheet(NEON_GREEN_STYLE)
+        self.copyright_group.setToolTip("Enter copyright and artist metadata")
+        copyright_layout = QGridLayout()
+        copyright_layout.addWidget(QLabel("Copyright:"), 0, 0)
+        self.copyright_input = QLineEdit()
+        copyright_layout.addWidget(self.copyright_input, 0, 1)
+        copyright_layout.addWidget(QLabel("Artist:"), 1, 0)
+        self.artist_input = QLineEdit()
+        copyright_layout.addWidget(self.artist_input, 1, 1)
+        self.copyright_group.setLayout(copyright_layout)
+        left_panel.addWidget(self.copyright_group)
+        self.misc_group = QGroupBox("Keywords, Title & Subject")
+        self.misc_group.setStyleSheet(NEON_GREEN_STYLE)
+        self.misc_group.setToolTip("Set keywords, title, and subject metadata fields")
+        misc_layout = QGridLayout()
+        misc_layout.addWidget(QLabel("Keywords (comma separated):"), 0, 0)
+        self.keywords_input = QLineEdit()
+        misc_layout.addWidget(self.keywords_input, 0, 1)
+        misc_layout.addWidget(QLabel("Title:"), 1, 0)
+        self.title_input = QLineEdit()
+        misc_layout.addWidget(self.title_input, 1, 1)
+        misc_layout.addWidget(QLabel("Subject:"), 2, 0)
+        self.subject_input = QLineEdit()
+        misc_layout.addWidget(self.subject_input, 2, 1)
+        self.misc_group.setLayout(misc_layout)
+        left_panel.addWidget(self.misc_group)
+        clear_backup_layout = QHBoxLayout()
+        self.erase_checkbox = QCheckBox("Clear all input fields")
+        clear_backup_layout.addWidget(self.erase_checkbox)
+        self.backup_checkbox = QCheckBox("Backup original files before editing")
+        self.backup_checkbox.setChecked(True)
+        clear_backup_layout.addWidget(self.backup_checkbox)
+        left_panel.addLayout(clear_backup_layout)
+        left_panel.addStretch()
+        self.apply_button = QPushButton("Apply Metadata")
+        self.apply_button.setEnabled(False)
+        default_height = self.apply_button.sizeHint().height()
+        self.apply_button.setFixedHeight(default_height * 2)
+        font = QFont("Comic Sans MS", int(self.apply_button.font().pointSize() * 1.5), QFont.Weight.Bold)
+        self.apply_button.setFont(font)
+        self.apply_button.setStyleSheet("background-color: #39FF14; color: black;")
+        left_panel.addWidget(self.apply_button)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.hide()
+        left_panel.addWidget(self.progress_bar)
+        right_panel = QVBoxLayout()
+        self.selected_files_list = QListWidget()
+        self.selected_files_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.selected_files_list.setIconSize(QSize(160, 160))
+        self.selected_files_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.selected_files_list.setSpacing(10)
+        right_panel.addWidget(self.selected_files_list, stretch=1)
+        right_panel.addWidget(QLabel("ExifTool Command & Console Output (Select & Ctrl+C to copy):"))
+        self.log_console = QTextEdit()
+        self.log_console.setReadOnly(True)
+        self.log_console.setStyleSheet("background-color: black; color: white; font-family: Consolas, monospace; font-size: 10pt;")
+        right_panel.addWidget(self.log_console, stretch=2)
+        self.save_log_button = QPushButton("Save Log to File")
+        right_panel.addWidget(self.save_log_button)
+        main_layout.addLayout(left_panel, stretch=1)
+        main_layout.addSpacing(10)
+        main_layout.addLayout(right_panel, stretch=2)
+        self.setLayout(main_layout)
+
+    def preload_ascii_art(self) -> None:
+        neon_green_html = f"<pre><font color='#39FF14'>{ASCII_ART}</font></pre>\n"
+        self.log_console.clear()
+        self.log_console.insertHtml(neon_green_html)
+
+    def setup_validators(self) -> None:
+        float_regex = QRegularExpression(r"^-?\d*\.?\d*$")
+        int_regex = QRegularExpression(r"^\d+$")
+        for widget in [self.lat_input, self.lon_input, self.alt_input]:
+            widget.setValidator(QRegularExpressionValidator(float_regex))
+        self.orientation_input.setValidator(QRegularExpressionValidator(int_regex))
+
+    def connect_signals(self) -> None:
+        self.btn_select_files.clicked.connect(self.open_file_dialog)
+        self.erase_checkbox.stateChanged.connect(self.clear_all_fields_if_checked)
+        self.apply_button.clicked.connect(self.start_exiftool_process)
+        self.save_log_button.clicked.connect(self.save_log)
+        for w in (
+            self.lat_input, self.lon_input, self.alt_input,
+            self.orientation_input, self.datetime_input,
+            self.keywords_input, self.title_input, self.subject_input,
+            self.artist_input, self.copyright_input
+        ):
+            w.textChanged.connect(self.validate_inputs)
+
+    def log(self, level: str, message: str) -> None:
+        color_map = {"info": "#39FF14", "debug": "#AAAAAA", "error": "#FF3333"}
+        color = color_map.get(level.lower(), "#39FF14")
+        cursor = self.log_console.textCursor()
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(color))
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(f"[{datetime.now().strftime('%H:%M:%S')}] {level.upper()}: {message}\n", fmt)
+        self.log_console.setTextCursor(cursor)
+        self.log_console.ensureCursorVisible()
+
+    def clear_all_fields_if_checked(self, state: int) -> None:
+        if state == Qt.CheckState.Checked.value:
+            for w in (
+                self.lat_input, self.lon_input, self.alt_input,
+                self.orientation_input, self.datetime_input,
+                self.keywords_input, self.title_input, self.subject_input,
+                self.artist_input, self.copyright_input
+            ):
+                w.clear()
+        self.validate_inputs()
+
+    def validate_inputs(self) -> bool:
+        valid = True
+        has_files = len(self.selected_files) > 0
+        if not has_files:
+            self.apply_button.setEnabled(False)
+            self.log_console.setPlaceholderText("Please select image files or folder.")
+            return False
+
+        def check_range(widget: QLineEdit, low: float, high: float) -> bool:
+            text = widget.text()
+            if widget.isEnabled() and text:
+                try:
+                    val = float(text)
+                    if val < low or val > high:
+                        widget.setStyleSheet("background-color:#550000;color:#FFAAAA;")
+                        return False
+                    else:
+                        widget.setStyleSheet("color: white; background-color: #222; border: 1px solid #00FF00; padding: 4px;")
+                        return True
+                except Exception:
+                    widget.setStyleSheet("background-color:#550000;color:#FFAAAA;")
+                    return False
+            widget.setStyleSheet("color: white; background-color: #222; border: 1px solid #00FF00; padding: 4px;")
+            return True
+
+        lat_ok = check_range(self.lat_input, -90, 90)
+        lon_ok = check_range(self.lon_input, -180, 180)
+        alt_ok = True
+        if self.alt_input.text():
+            try:
+                float(self.alt_input.text())
+                self.alt_input.setStyleSheet("color: white; background-color: #222; border: 1px solid #00FF00; padding: 4px;")
+            except Exception:
+                self.alt_input.setStyleSheet("background-color:#550000;color:#FFAAAA;")
+                alt_ok = False
+        else:
+            self.alt_input.setStyleSheet("color: white; background-color: #222; border: 1px solid #00FF00; padding: 4px;")
+        orientation_ok = True
+        if self.orientation_input.text():
+            try:
+                val = int(self.orientation_input.text())
+                orientation_ok = 1 <= val <= 8
+            except Exception:
+                orientation_ok = False
+            self.orientation_input.setStyleSheet(
+                "" if orientation_ok else "background-color:#550000;color:#FFAAAA;"
+            )
+        else:
+            self.orientation_input.setStyleSheet(
+                "color: white; background-color: #222; border: 1px solid #00FF00; padding: 4px;"
+            )
+        dt_ok = True
+        dt_text = self.datetime_input.text()
+        if dt_text:
+            if not re.match(r"^\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2}$", dt_text):
+                dt_ok = False
+            else:
+                try:
+                    datetime.strptime(dt_text, "%Y:%m:%d %H:%M:%S")
+                except Exception:
+                    dt_ok = False
+            self.dt_error.setText("" if dt_ok else "Use format YYYY:MM:DD HH:MM:SS")
+            self.datetime_input.setStyleSheet(
+                "" if dt_ok else "background-color:#550000;color:#FFAAAA;"
+            )
+        else:
+            self.dt_error.setText("")
+            self.datetime_input.setStyleSheet(
+                "color: white; background-color: #222; border: 1px solid #00FF00; padding: 4px;"
+            )
+
+        valid = lat_ok and lon_ok and alt_ok and orientation_ok and dt_ok
+        self.apply_button.setEnabled(valid and has_files)
+        return valid
+
+    def open_file_dialog(self) -> None:
+        options = QFileDialog.Option.ReadOnly | QFileDialog.Option.DontUseNativeDialog
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Images",
+            "",
+            "Image Files (*.jpg *.jpeg *.png *.tiff *.nef *.cr2 *.raw *.dng *.arw *.rw2 *.orf *.sr2);;All Files (*)",
+            options=options,
+        )
+        if files:
+            self.set_selected_files(files)
+
+    def set_selected_files(self, files: List[str]) -> None:
+        self.selected_files = files
+        self.file_label.setText(f"{len(files)} files selected.")
+        self.selected_files_list.clear()
+        for file_path in files:
+            icon = QIcon()
+            if os.path.exists(file_path):
+                pixmap = QPixmap(file_path)
+                if not pixmap.isNull():
+                    icon = QIcon(
+                        pixmap.scaled(
+                            160,
+                            160,
+                            aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatio,
+                            transformMode=Qt.TransformationMode.SmoothTransformation,
+                        )
+                    )
+                else:
+                    icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+            else:
+                icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+            item = QListWidgetItem(icon, os.path.basename(file_path))
+            item.setToolTip(file_path)
+            self.selected_files_list.addItem(item)
+        self.validate_inputs()
+
+    def prepare_exiftool_command(self) -> List[str]:
+        args: List[str] = []
+        lat_text = self.lat_input.text()
+        lon_text = self.lon_input.text()
+        if lat_text and lon_text:
+            lat = float(lat_text)
+            lon = float(lon_text)
+            lat_ref = "N" if lat >= 0 else "S"
+            lon_ref = "E" if lon >= 0 else "W"
+            args.append(f"-GPSLatitude={abs(lat)}")
+            args.append(f"-GPSLatitudeRef={lat_ref}")
+            args.append(f"-GPSLongitude={abs(lon)}")
+            args.append(f"-GPSLongitudeRef={lon_ref}")
+            if self.alt_input.text():
+                args.append(f"-GPSAltitude={float(self.alt_input.text())}")
+                args.append("-GPSAltitudeRef=0")
+        if self.orientation_input.text():
+            args.append(f"-Orientation={self.orientation_input.text()}")
+        dt = self.datetime_input.text()
+        if dt:
+            args.extend(
+                [f"-DateTimeOriginal={dt}", f"-CreateDate={dt}", f"-ModifyDate={dt}"]
+            )
+        kw_text = self.keywords_input.text()
+        if kw_text:
+            kws = [k.strip() for k in kw_text.split(",") if k.strip()]
+            args.append("-XMP:Subject=")
+            for kw in kws:
+                args.append(f"-XMP:Subject+={kw}")
+        if self.title_input.text():
+            title_trim = self.title_input.text().strip()
+            args.append(f"-XMP:Title={title_trim}")
+            args.append(f"-IPTC:ObjectName={title_trim}")
+        if self.subject_input.text():
+            args.append(f"-XMP:Subject={self.subject_input.text().strip()}")
+        if self.copyright_input.text():
+            args.append(f"-Copyright={self.copyright_input.text().strip()}")
+        if self.artist_input.text():
+            args.append(f"-Artist={self.artist_input.text().strip()}")
+        args.append("-o")
+        args.append("%d%f_Geotagged.%e")
+        args.extend(self.selected_files)
+        self.last_command = " ".join(args)
+        self.log("debug", f"Prepared ExifTool command:\n{self.last_command}")
+        return args
+
+    def start_exiftool_process(self) -> None:
+        if self.exif_worker and self.exif_worker.isRunning():
+            self.log("error", "ExifTool process already running!")
+            return
+        args = self.prepare_exiftool_command()
+        self.log_console.clear()
+        self.preload_ascii_art()
+        self.progress_bar.setValue(0)
+        self.progress_bar.show()
+        self.apply_button.setEnabled(False)
+        self.set_inputs_enabled(False)
+        self.exif_worker = ExifToolWorker(self.exiftool_path, args, len(self.selected_files))
+        self.exif_worker.log_signal.connect(self.log)
+        self.exif_worker.progress_signal.connect(self.progress_bar.setValue)
+        self.exif_worker.finished_signal.connect(self.on_exiftool_finished)
+        self.exif_worker.start()
+
+    def set_inputs_enabled(self, enabled: bool) -> None:
+        widgets = [
+            self.lat_input, self.lon_input, self.alt_input,
+            self.orientation_input, self.datetime_input,
+            self.keywords_input, self.title_input, self.subject_input,
+            self.artist_input, self.copyright_input,
+            self.erase_checkbox, self.backup_checkbox, self.recursive_checkbox,
+            self.apply_button,
+        ]
+        for w in widgets:
+            w.setEnabled(enabled)
+
+    def on_exiftool_finished(self, success: bool) -> None:
+        self.progress_bar.hide()
+        self.set_inputs_enabled(True)
+        self.apply_button.setEnabled(success)
+        if success:
+            QMessageBox.information(self, "Success", "All files processed successfully.")
+            self.log("info", "All files processed successfully.")
+        else:
+            QMessageBox.critical(self, "Error", "Processing finished with errors.")
+            self.log("error", "Processing finished with errors.")
+
+    def save_log(self) -> None:
+        options = QFileDialog.Option.DontUseNativeDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Log to File",
+            "exiftool_log.txt",
+            "Text files (*.txt);;All Files (*)",
+            options=options,
+        )
+        if path:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(self.log_console.toPlainText())
+                self.log("info", f"Log saved to '{path}'")
+            except Exception as e:
+                self.log("error", f"Failed to save log file: {e}")
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = ExifToolGPSApp()
+    window.setAcceptDrops(True)
+    window.show()
+    sys.exit(app.exec())
