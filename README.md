@@ -1,29 +1,50 @@
 # ExifTool GPS & Metadata Setter
 
-**A PyQt6 application for batch editing image metadata**  
-_Useful for photographers and digital asset managers._
+A user-friendly PyQt6 desktop application for batch editing image metadata and GPS geotags using the powerful [ExifTool](https://exiftool.org/) command-line utility by Phil Harvey, and upgraded as well as UI friendly GUI created by Jordan Smith of Growthkey.tech
 
-## Features
+---
 
-- Select images or folders (with recursive option)
-- Edit GPS data, timestamps, and other metadata
-- Preview images in large icons (twice normal size)
-- Styled "Apply Metadata" button (larger, bold, neon green)
-- Console output with real-time logs and progress bar
-- Tooltips on sections for clarity
+## Overview
 
-## How to run
+This application provides an intuitive graphical interface to select images or entire folders, specify GPS coordinates, orientation, timestamps, copyright, and additional metadata fields. Using ExifTool in the background, it applies changes efficiently across multiple files.
 
-1. Download and set the ExifTool executable in the specified folder.  
-2. Install dependencies: `pip install pyqt6`  
-3. Run the script: `python exiftool_gps_app.py`
+### Key features:
+- Select individual images or complete folders (optionally recursive)
+- Enter GPS latitude, longitude, and altitude metadata
+- Edit EXIF orientation codes, date/time original, create, and modify fields
+- Add copyright, artist, keywords, titles, and subjects metadata
+- Preview selected images with enlarged icons (160x160 pixels)
+- Real-time console logging of ExifTool command and output
+- Progress bar indicating batch processing status
+- Stylized **Apply Metadata** button (neon green, bold, 50% larger font, unique font)
+- Tooltips on main sections for ease of use
 
-## Credits
+---
 
-- **ExifTool** by Phil Harvey - https://exiftool.org/  
-- UI developed with PyQt6
+## Installation & Requirements
 
-## License
+- Python 3.8 or newer
+- [PyQt6](https://pypi.org/project/PyQt6/)
+- ExifTool executable (`exiftool.exe`) by Phil Harvey
 
-MIT License — See LICENSE file.
+### ExifTool Download and Credit
+
+ExifTool, developed and maintained by Phil Harvey, is a widely respected and robust metadata manipulation tool.  
+The original ExifTool executable used by this app can be downloaded freely from the official website:  
+[https://exiftool.org/](https://exiftool.org/)
+
+Please ensure `exiftool.exe` is downloaded from the official source and placed in the configured application folder.
+
+---
+
+## Usage
+
+1. Download and place `exiftool.exe` in the specified `Change Image EXIF+Geotag` folder or adjust the path in the script accordingly.
+2. Install PyQt6 via pip if not installed:
+3. Run the PyQt6 application script:
+4. Use the **Select Images or Folder** button to choose files.
+5. Fill in desired GPS, date/time, orientation, copyright, and descriptive metadata.
+6. Click the **Apply Metadata** button to process all selected files.
+7. Monitor the progress bar and console log output for success or error messages.
+8. Optionally save the log output to a text file.
 
