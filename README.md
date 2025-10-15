@@ -48,3 +48,7 @@ Please ensure `exiftool.exe` is downloaded from the official source and placed i
 7. Monitor the progress bar and console log output for success or error messages.
 8. Optionally save the log output to a text file.
 
+---
+
+
+Thank you for using this tool! Contributions and improvements are welcome.
